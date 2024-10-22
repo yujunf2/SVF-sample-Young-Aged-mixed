@@ -1,0 +1,131 @@
+---
+title: "SVF_YoungAged_high_resolution"
+output: html_document
+date: "2024-09-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Subtype analysis for macrophage and T cells in Young-Aged SVF mix test 
+
+This vignette is to show the minimal data processing steps for macrophage and T cell subtype analysis in Young-Aged SVF cell mixing test. This script includes 2 sections: \
+
+1. High resolution cell subtype for macrophages;\ 
+2. Pseudotime analysis for T cell subtypes. 
+
+#2. Pseudotime analysis for T cell subtypes 
+```{r ,message=FALSE,warning=FALSE} 
+
+#subset T cells 
+
+Idents(SVFya_soup)<-SVFya_soup$seurat_clusters
+T_SVF<-subset(SVFya_soup,subset= seurat_clusters== "1"|seurat_clusters== "2"|seurat_clusters== "5"|seurat_clusters== "9"|seurat_clusters== "18")
+
+#remove negatives or multiplets, and here we show the analysis of T cells from aged group
+
+Idents(T_SVF)<-T_SVF$deMULTIplex
+T_A_SVF<-subset(T_SVF,idents="HTOAged")
+
+T_Y_SVF<-subset(T_SVF,idents="HTOYoung")
+
+#load Monocle3 library (Trapnell et al.)
+library(monocle3)
+library(SeuratWrappers)
+T_traj<-as.cell_data_set(T_SVF) 
+
+fData(T_traj)$gene_short_name<-rownames(fData(T_traj))
+reacreate.partition <- c(rep(1,length(T_traj@colData@rownames)))
+names(reacreate.partition) <- T_traj@colData@rownames
+reacreate.partition <- as.factor(reacreate.partition)
+
+#Use Monocle3 to analyze T cell trajectory
+
+T_traj@clusters$UMAP$partitions <- reacreate.partition
+list_cluster <- T_A_SVF$seurat_clusters
+T_traj@clusters$UMAP$clusters <- list_cluster
+
+T_traj@int_colData@listData$reducedDims$UMAP <- T_A_SVF@reductions$umap@cell.embeddings
+
+cluster.before.trajectory <- plot_cells(T_traj,
+                                        color_cells_by = 'cluster',
+                                        label_groups_by_cluster = FALSE,
+                                        group_label_size = 8,
+                                       cell_size = 1 ) +
+  theme(legend.position = "right")
+
+cluster.names <- plot_cells(T_traj,
+                            color_cells_by = "seurat_clusters",
+                            label_groups_by_cluster = FALSE,
+                            group_label_size = 5,
+                            cell_size = 3) +
+  scale_color_manual(values = c('red', 'blue', 'green', 'maroon')) +
+  theme(legend.position = "right")
+
+
+T_traj <- learn_graph(T_traj, use_partition = FALSE)
+plot_cells(T_traj,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 5,
+           cell_size = 1)
+
+#cluster 18 has high expression of Stmn and Pclaf, which are reported as cycling T cell features (Cottam et al.)
+T_traj <- order_cells(T_traj, reduction_method = 'UMAP', root_cells = colnames(T_traj[,clusters(T_traj) == '18']))
+
+plot_cells(T_traj,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           cell_size = 1)
+
+plot_cells(T_traj,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           cell_size = 1,
+           trajectory_graph_color = "grey",
+            group_label_size = 5) 
+
+Idents(T_A_SVF)<-T_A_SVF$seurat_clusters
+CD8_LvsE <- FindMarkers(T_A_SVF, 
+                         ident.1 = c("2","9"), 
+                         ident.2 = "5",
+                         assay = "SCT", 
+                         slot = "data",
+                         min.pct = 0.25, 
+                         logfc.threshold = 0.1)
+
+CD8_LvsE<- CD8_LvsE %>% mutate(logP = -log10(p_val), signif = ifelse(p_val < 0.01 & abs(avg_log2FC)>1, "significant", "not significant"))
+CD8_LvsE$gene<-rownames(CD8_LvsE)
+
+T_genes_to_label <- CD8_LvsE%>% 
+  filter(signif=="significant")
+
+p<- ggplot(CD8_LvsE, aes(x = avg_log2FC, y = logP, color = signif)) +
+  geom_point(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Volcano plot of DE genes in CD8+ T cells", x = "Log2 Fold Change", y = "-Log10 p-value") +
+  geom_text(data = T_genes_to_label, aes(label = gene), vjust = 1.5, hjust = 0.5, check_overlap = TRUE, size = 3) +
+  scale_color_manual(values = c("significant" = "red", "not significant" = "black")) 
+
+
+```
+
+## Including Plots
+
+
+```{r pressure, echo=FALSE}
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

@@ -1,0 +1,400 @@
+---
+title: "SVF_Young_Aged_compare"
+output: html_document
+date: "2024-08-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Test of mixed SVF cells from young or aged mice in obese state 
+
+This vignette is to show the minimal data processing steps after CellRanger output (shown in folder 10X_CellRangerReport/), in order to repeat major results shown in the Figure 5 for SVF cells mixing test. This script includes 2 sections: \
+1. Preprocessing of RNA matrix by Seurat, SoupX and Barcode matrix by CellHashR;\
+2. Low resolution cell type annotation for SVF cells and differential gene expression in macrophage and other cell types;\
+
+
+# 1. Preprocessing RNA and barcode matrix 
+First, load necessary packages:
+
+```{r ,message=FALSE,warning=FALSE}
+library(tidyverse)
+library(Seurat)
+library(SoupX)
+library(dittoSeq)
+library(sctransform)
+library(ggplot2)
+library(cellhashR)
+library(scran)
+library(scater)
+library(DropletUtils)
+library(scRNAseq)
+library(SingleR) 
+```
+
+
+```{r, ,message=FALSE,warning=FALSE, fig.width=15, fig.height=5}
+
+scData<-Read10X(data.dir="~/SVF_YoungAged/Data/readmatrix/filtered_feature_bc_matrix") 
+
+SVFya<-CreateSeuratObject(
+  counts=scData[[1]],
+  names.field=1,
+  names.delim = "-",
+  min.cells = 20)
+
+SVFya_barcode<-CreateSeuratObject(
+  counts=scData[[2]],
+  names.field=1,
+  names.delim = "-",
+  min.cells = 20)
+
+mgenes <-  rownames(SVFya)
+MT.genes.mouse <- grep("^mt-", mgenes, value = TRUE) 
+
+SVFya[["percent.mt"]] <- PercentageFeatureSet(SVFya, features = MT.genes.mouse) 
+
+temp1 <- scater::isOutlier(SVFya$percent.mt, 
+                           nmads = 3, type = "higher") 
+
+mt.threshold <- min(SVFya$percent.mt[temp1])
+mt.threshold
+#[1] 6.149783 
+SVFya_filter <- subset(SVFya, 
+                        subset = percent.mt < mt.threshold) 
+
+plot1 <- FeatureScatter(SVFya_filter, 
+                        feature1 = "nCount_RNA", 
+                        feature2 = "percent.mt")
+plot2 <- FeatureScatter(SVFya_filter, 
+                        feature1 = "nCount_RNA", 
+                        feature2 = "nFeature_RNA")
+plot3 <- FeatureScatter(SVFya_filter, 
+                        feature1 = "percent.mt", 
+                        feature2 = "nFeature_RNA")
+plot1+plot2+plot3
+
+```
+
+```{r, ,message=FALSE,warning=FALSE}
+
+SVFya_filter <- SCTransform(SVFya_filter, 
+                             method = "glmGamPoi",
+                             vars.to.regress = c("percent.mt"), 
+                             return.only.var.genes = FALSE, 
+                             vst.flavor = "v2")
+
+DefaultAssay(SVFya_filter) 
+SVFya_filter <- RunPCA(SVFya_filter, verbose = FALSE)
+ElbowPlot(SVFya_filter, 50) 
+
+SVFya_filter <- RunUMAP(SVFya_filter, 
+                         dims = 1:40, 
+                         verbose = FALSE) 
+
+SVFya_filter <- FindNeighbors(SVFya_filter, dims = 1:40, verbose = FALSE)
+SVFya_filter <- FindClusters(SVFya_filter, verbose = TRUE) 
+
+table(SVFya_filter$seurat_clusters) 
+# 0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22 
+#625 608 579 462 431 415 391 279 268 215 198 187 172 145 132 127  84  76  56  55  53  26  25 
+
+joint.bcs<-intersect(colnames(SVFya_filter),colnames(scData[[1]])) 
+scData<-scData[[1]]
+scData<-scData[,joint.bcs]
+
+scData_raw<-Read10X(data.dir = "~/SVF_YoungAged/Data/readmatrix/raw_feature_bc_matrix/")
+sc<- SoupChannel(scData_raw[[1]], scData, calcSoupProfile = FALSE) 
+sc<- estimateSoup(sc)
+
+SVFya_meta<-SVFya_filter[[]]
+sc<-setClusters(sc, setNames(SVFya_meta$seurat_clusters, rownames(SVFya_meta)))
+umap<-SVFya_filter@reductions$umap@cell.embeddings
+sc <- setDR(sc, umap)
+sc <- autoEstCont(sc)
+
+#show the top20 background genes, all of them are human genes 
+head(sc$soupProfile[order(sc$soupProfile$est, decreasing = T), ], n = 20)
+
+#output cleaned matrix 
+adj.matrix  <- adjustCounts(sc, roundToInt = T)
+
+DropletUtils:::write10xCounts("soupX_SVFya_filter", adj.matrix)  
+
+```
+
+After SoupX cleaning, we load the matrix to rerun clustering: 
+
+```{r, ,message=FALSE,warning=FALSE,fig.width=15, fig.height=5}
+scData<-Read10X(data.dir="~/SVF_YoungAged/soupX_SVFya_filt/")
+SVFya_soup<-CreateSeuratObject(
+  counts=scData,
+  names.field=1,
+  names.delim = "-",
+  min.cells = 10)
+
+SVFya_soup <- SCTransform(SVFya_soup, 
+                             method = "glmGamPoi",
+                             return.only.var.genes = FALSE, 
+                             vst.flavor = "v2") 
+
+SVFya_soup <- RunPCA(SVFya_soup, verbose = FALSE)
+p<-ElbowPlot(SVFya_soup, 50)
+SVFya_soup <- RunUMAP(SVFya_soup, 
+                         dims = 1:40, 
+                         verbose = FALSE)
+SVFya_soup <- FindNeighbors(SVFya_soup, dims = 1:40, verbose = FALSE) 
+SVFya_soup <- FindClusters(SVFya_soup, verbose = TRUE) 
+
+p<-dittoDimPlot(SVFya_soup, 
+                var = "seurat_clusters", 
+                reduction.use = "umap", 
+                do.label = TRUE, 
+                labels.highlight = TRUE, 
+                size = 1,
+                labels.size = 5)+
+  labs(title = "UMAP of SVF (mixed) cells after SoupX",
+       x= "UMAP-1",
+       y= "UMAP-2")+
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title.x = element_text(size = 18, face = "bold", vjust = 0.5),
+        axis.title.y = element_text(size = 18, face = "bold", angle = 90, vjust = 0.5))
+p 
+
+#Identify the top10 markers in each cluster to annotate major cell types 
+
+SVFya_soup%>% DefaultAssay()
+
+SVFya_soup_markers <- FindAllMarkers(SVFya_soup, verbose = FALSE,
+                                     assay = "SCT", 
+                                     slot = "data",
+                                     min.pct = 0.1, 
+                                     logfc.threshold = 0.25,
+                                     max.cells.per.ident = 800)
+
+top20 <- SVFya_soup_markers %>% 
+  group_by(cluster) %>%
+  slice_min(order_by =  p_val, n = 20, with_ties = FALSE) %>%
+  ungroup() 
+
+
+
+#first, we use SingleR package and ImmGen Database to set a reference cell annotation results
+
+ImmGen <- celldex::ImmGenData() 
+Idents(SVFya_soup)<-"seurat_clusters"
+singleR <- as.SingleCellExperiment(SVFya_soup, assay= "SCT") 
+singler.ImmGen <- SingleR(test = singleR, ref = ImmGen, labels = (ImmGen$label.main))
+SVFya_soup[["ImmGen"]] <- singler.ImmGen$labels 
+
+
+p2<-dittoDimPlot(SVFya_soup, 
+                 var = "seurat_clusters", 
+                 reduction.use = "umap", 
+                 size = 1,
+                 legend.size = 4,
+                 do.label = TRUE, 
+                 labels.highlight =FALSE)
+p2
+
+p2<-dittoDimPlot(SVFya_soup, 
+                 var = "ImmGen", 
+                 reduction.use = "umap", 
+                 size = 1,
+                 legend.size = 4,
+                 do.label = TRUE, 
+                 labels.highlight =FALSE)
+p2
+
+#Then, we annotate the cell type mannually. The markers used to identify cell type is listed in Table S 
+#The refence publications we refer to are also listed in Table S7 and S8   
+
+Idents(SVFya_soup)<-SVFya_soup$seurat_clusters
+
+SVFya_soup<- RenameIdents(SVFya_soup, 
+                              `0` = "Mø-1", 
+                              `1` = "CD4+ T Cells-1",
+                              `2` = "CD8+ T Cells-1", 
+                              `3` = "B Cells-1", 
+                              `4` = "Monocytes-1", 
+                              `5` = "CD8+ T Cells-2",
+                              `6` = "Mø-2", 
+                              `7` = "Monocytes-2",
+                             `8` = "Dendritic Cells-1", 
+                             `9` = "CD8+ T Cells-3",
+                             `10` = "Mø-3", 
+                             `11` = "NK Cells", 
+                             `12` = "Mø-4", 
+                             `13` = "Plasma Cells",
+                             `14` = "Preadipocytes", 
+                             `15` = "Fibro-inflammatory Progenitors", 
+                              `16` = "B Cells-2", 
+                              `17` = "Tgd Cells",
+                              `18` = "CD4+ T Cells-2", 
+                              `19` = "Dendritic Cells-2", 
+                              `20` = "Unidentified", 
+                              `21` = "Mast Cells",
+                         `22` ="Efferocytes",
+                         `23`= "Neutrophils")
+
+SVFya_soup[["celltype.manual"]] <- Idents(object = SVFya_soup)
+
+p2<-dittoDimPlot(SVFya_soup, 
+                 var = "celltype.manual", 
+                 reduction.use = "umap", 
+                 size = 1,
+                 legend.size = 4,
+                 do.label = TRUE, 
+                 labels.highlight =FALSE)
+p2
+
+
+#Here, we also did a low-resolution manual cell type annotation based on top markers expressed in each cluster. We used Panglao Database, and recent publications as references (list of markers are shown in Table S7 and S8)
+
+```
+
+Then we process the barcode matrix: 
+
+```{r, ,message=FALSE,warning=FALSE}
+
+joint.bcs<-intersect(colnames(SVFya_filter),colnames(SVFya_barcode))
+SVFya_barcode_filter<- SVFya_barcode[,joint.bcs] 
+
+raw_counts <- GetAssayData(SVFya_barcode_filter, assay = "RNA", layer  = "counts")
+raw_counts_matrix <- as.matrix(raw_counts) 
+write.csv(raw_counts_matrix, file = "raw_counts.csv") 
+
+barcodeData <- ProcessCountMatrix(rawCountData = 'raw_counts.csv', minCountPerCell = 0)
+calls <- GenerateCellHashingCalls(barcodeMatrix = barcodeData, methods = c('multiseq', 'htodemux'))  
+
+#the HTOdemux method sets a high threshold and some cells in the 'positive' part of bimodal distribution are classified as negative ones. We foung the classification by demultiplex method looks normal, hence the classification by this method is added to the metadata: 
+SVFya_soup[["deMULTIplex"]]<-calls$multiseq 
+
+#Then we collect the HTO barcode based cell classification for each subtype 
+table(SVFya_soup$celltype.manual,SVFya_soup$deMULTIplex)
+
+#Then we compared differential gene expression for selected cell type between young and aged group
+
+#Macrophages 
+
+Idents(SVFya_soup)<-SVFya_soup$seurat_clusters
+#subset macrophages clusters by cluster number 
+#cluster 0,6,10,12 are macrophage 
+SVFya_soup_Macro<-subset(SVFya_soup, subset= seurat_clusters=="0"|seurat_clusters=="6"|seurat_clusters=="10"|seurat_clusters=="12") 
+
+table(SVFya_soup_Macro$celltype.manual)
+
+Idents(SVFya_soup_Macro) <- "deMULTIplex"
+
+AvY_macro <- FindMarkers(SVFya_soup_Macro, 
+                            ident.1 = "HTOAged", 
+                            ident.2 = "HTOYoung",
+                            assay = "SCT", 
+                            slot = "data",
+                            min.pct = 0.25, 
+                            logfc.threshold = 0.1)
+AvY_macro$gene <- rownames(AvY_macro)
+colnames(AvY_macro)
+AvY_macro<- AvY_macro %>% mutate(logP = -log10(p_val), signif = ifelse(p_val < 0.01 & abs(avg_log2FC)>1, "significant", "not significant"))
+
+M_genes_to_label <- AvY_macro %>% 
+  filter(signif=="significant")
+
+p<-ggplot(AvY_macro, aes(x = avg_log2FC, y = logP)) +
+  geom_point(aes(color = signif), alpha = 0.5) +
+  geom_text(data = M_genes_to_label, aes(label = gene), vjust = 1.5, hjust = 0.5, check_overlap = TRUE, size = 3) +
+  theme_minimal() +
+  labs(title = "Volcano plot of differentially expressed genes in Macrophages", x = "Log2 Fold Change", y = "-Log10 p-value") +
+  scale_color_manual(values = c("significant" = "red", "not significant" = "black"))
+p
+
+
+
+#Pre-adipocytes
+Idents(SVFya_soup)<-SVFya_soup$celltype.manual
+SVFya_soup_Pre<-subset(SVFya_soup, idents="Preadipocytes") 
+
+Idents(SVFya_soup_Pre) <- "deMULTIplex"
+
+AvY_Pre <- FindMarkers(SVFya_soup_Pre, 
+                            ident.1 = "HTOAged", 
+                            ident.2 = "HTOYoung",
+                            assay = "SCT", 
+                            slot = "data",
+                            min.pct = 0.25, 
+                            logfc.threshold = 0.1)
+
+AvY_Pre$gene<-rownames(AvY_Pre)
+AvY_Pre<- AvY_Pre %>% mutate(logP = -log10(p_val), signif = ifelse(p_val < 0.01 & abs(avg_log2FC)>1, "significant", "not significant"))
+P_genes_to_label <- AvY_Pre %>% 
+  filter(signif=="significant")
+
+p<-ggplot(AvY_Pre, aes(x = avg_log2FC, y = logP)) +
+  geom_point(aes(color = signif), alpha = 0.5) +
+  geom_text(data = P_genes_to_label, aes(label = gene), vjust = 1.5, hjust = 0.5, check_overlap = TRUE, size = 3) +
+  theme_minimal() +
+  labs(title = "Volcano plot of differentially expressed genes in Preadipocytes", x = "Log2 Fold Change", y = "-Log10 p-value") +
+  scale_color_manual(values = c("significant" = "red", "not significant" = "black"))
+p
+
+#FIP
+Idents(SVFya_soup)<-SVFya_soup$celltype.manual
+SVFya_soup_FIP<-subset(SVFya_soup, idents="Fibro-inflammatory Progenitors") 
+Idents(SVFya_soup_FIP) <- "deMULTIplex"
+
+AvY_FIP <- FindMarkers(SVFya_soup_FIP, 
+                            ident.1 = "HTOAged", 
+                            ident.2 = "HTOYoung",
+                            assay = "SCT", 
+                            slot = "data",
+                            min.pct = 0.25, 
+                            logfc.threshold = 0.1)
+AvY_FIP$gene<-rownames(AvY_FIP)
+AvY_FIP<- AvY_FIP %>% mutate(logP = -log10(p_val), signif = ifelse(p_val < 0.01 & abs(avg_log2FC)>1, "significant", "not significant"))
+F_genes_to_label <- AvY_FIP %>% 
+  filter(signif=="significant")
+
+p<-ggplot(AvY_FIP, aes(x = avg_log2FC, y = logP)) +
+  geom_point(aes(color = signif), alpha = 0.5) +
+  geom_text(data = F_genes_to_label, aes(label = gene), vjust = 1.5, hjust = 0.5, check_overlap = TRUE, size = 3) +
+  theme_minimal() +
+  labs(title = "Volcano plot of differentially expressed genes in FIP", x = "Log2 Fold Change", y = "-Log10 p-value") +
+  scale_color_manual(values = c("significant" = "red", "not significant" = "black"))
+p
+```
+Then, we analyze the significant DE genes through Gene Ontocoly, using ClusterProfiler package (Yu et al. 2012)
+
+```{r, ,message=FALSE,warning=FALSE} 
+
+#load corresponding package
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+M_genes_up <- AvY_macro %>% 
+  filter(logP>10, avg_log2FC > 0.5)
+M_genes_down <- AvY_macro %>% 
+  filter(logP>10, avg_log2FC < -0.5)
+
+M_genes_up<-M_genes_up$gene%>% as.character()
+M_genes_down<-M_genes_down$gene%>% as.character()
+
+ego_up <- enrichGO(gene         = M_genes_up,
+                OrgDb        = org.Mm.eg.db, 
+                keyType      = "SYMBOL", 
+                ont          = "MF", 
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05)
+dotplot(ego_up)
+
+ego_up_bp <- enrichGO(gene         = M_genes_up,
+                   OrgDb        = org.Mm.eg.db, 
+                   keyType      = "SYMBOL", 
+                   ont          = "BP", 
+                   pAdjustMethod = "BH",
+                   qvalueCutoff = 0.05)
+dotplot(ego_up_bp)
+
+#same steps are run for M_genes_down and for preadipocytes and FIP
+
+```
